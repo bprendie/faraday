@@ -1,0 +1,24 @@
+[Unit]
+Description=Faraday reversible laptop isolation monitor
+After=NetworkManager.service nftables.service firewalld.service ufw.service faraday-boot.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/faraday-helper watch
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=faraday
+RuntimeDirectoryMode=0755
+StateDirectory=faraday
+StateDirectoryMode=0700
+UMask=0077
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.bprendie.faraday",
+  "name": "Faraday",
+  "version": "0.1.2",
+  "author": "Bob Prendergast",
+  "license": "MIT",
+  "description": "Reversible laptop isolation with Caged, Selective, and Normal modes.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {"barWidget": "Panel.qml"},
+  "barWidget": {
+    "displayName": "Faraday",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

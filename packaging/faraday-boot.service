@@ -1,0 +1,15 @@
+[Unit]
+Description=Restore Faraday isolation before networking starts
+DefaultDependencies=no
+After=local-fs.target nftables.service firewalld.service ufw.service
+Before=network-pre.target NetworkManager.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/faraday-helper boot
+RemainAfterExit=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
