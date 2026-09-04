@@ -179,7 +179,7 @@ Panel {
                 visible: root.info.phase === "active"
                 width: parent.width
                 text: root.info.mode === "manual-wifi"
-                    ? "Incoming connections blocked · Wi-Fi autoconnect off\nBluetooth, cellular, NFC and other radios off"
+                    ? "Incoming connections blocked · Wi-Fi autoconnect off\nOther radios by choice · Bluetooth non-discoverable"
                     : "Network traffic blocked · all radios off"
                 wrapMode: Text.WordWrap; color: Color.foreground
                 font.family: Style.font.family; font.pixelSize: Style.font.bodySmall

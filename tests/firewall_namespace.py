@@ -104,6 +104,16 @@ def main():
         assert probe("192.0.2.2"), "manual IPv4 replies must work"
         assert probe("2001:db8::2"), "manual IPv6 replies must work"
         assert probe("127.0.0.1"), "loopback must work"
+        # A cellular IP interface gets the same outbound-only policy, and loses
+        # egress permission when it is removed from the discovered allowlist.
+        command("ip", "link", "set", "test-wifi", "name", "test-cellular")
+        assert not probe("192.0.2.2"), "undiscovered cellular interface must be blocked"
+        system.firewall("manual-wifi", {"wifi": {"name": "test-wifi"},
+                                        "cellular": {"name": "test-cellular"}})
+        assert probe("192.0.2.2") and probe("2001:db8::2"), "cellular replies must work"
+        assert not ask("ipv4") and not ask("ipv6"), "cellular unsolicited inbound must be blocked"
+        system.firewall("manual-wifi", {"wifi": {"name": "test-wifi"}})
+        assert not probe("192.0.2.2") and not probe("2001:db8::2"), "removed cellular egress must be blocked"
         system.firewall("sealed", {})
         assert not probe("192.0.2.2"), "sealed outbound IPv4"
         assert not probe("2001:db8::2"), "sealed outbound IPv6"

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.bprendie.faraday",
   "name": "Faraday",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": "Bob Prendergast",
   "license": "MIT",
   "description": "Reversible laptop isolation with Caged, Selective, and Normal modes.",

@@ -22,8 +22,8 @@ class FakeLinux:
             "bt": {"id": 7, "device": "hci1", "type": "bluetooth", "soft": True, "hard": False},
             "nfc": {"id": 9, "device": "nfc2", "type": "nfc", "soft": False, "hard": False}}
         self.profile_data = {"uuid-a": True, "uuid-b": False}
-        self.bluetooth_data = {"adapter-a": {"path": "/org/bluez/hci1", "powered": False},
-                               "adapter-b": {"path": "/org/bluez/hci2", "powered": True}}
+        self.bluetooth_data = {"adapter-a": {"path": "/org/bluez/hci1", "powered": False, "discoverable": False},
+                               "adapter-b": {"path": "/org/bluez/hci2", "powered": True, "discoverable": True}}
         self.device_data = {"pci-path": {"name": "wlp42s0", "autoconnect": True}}
         self.nm_data = {"wifi": True, "wwan": False}
         self.idle_data = {"lock": 317, "awake": True}
@@ -45,6 +45,8 @@ class FakeLinux:
     def profiles(self): return self.profile_data.copy()
     def devices(self): return copy.deepcopy(self.device_data)
     def nm_radios(self): return self.nm_data.copy()
+    def cellular_devices(self):
+        return {"cellular:modem": {"name": "wwan-test"}} if self.nm_data["wwan"] else {}
     def active_connections(self): return self.connections[:]
     def table_state(self): return self.tables.copy()
     def bluetooth(self): return copy.deepcopy(self.bluetooth_data)
@@ -54,6 +56,14 @@ class FakeLinux:
         for row in self.bluetooth_data.values():
             if row["path"] == adapter["path"]:
                 row["powered"] = powered
+
+    def set_bluetooth_discoverable(self, adapter, discoverable):
+        self.event("discoverable:" + adapter["path"])
+        for row in self.bluetooth_data.values():
+            if row["path"] == adapter["path"]:
+                if not row["powered"]:
+                    raise faraday.Failure("BlueZ adapter is off")
+                row["discoverable"] = discoverable
 
     def idle(self, action, snapshot=None):
         self.event("idle:" + action)
@@ -297,12 +307,108 @@ class ControllerTests(unittest.TestCase):
         self.ctl.restore()
         self.assertEqual(self.system.bluetooth(), original)
 
-    def test_bluetooth_power_drift_is_repaired(self):
-        self.ctl.activate("manual-wifi")
+    def test_bluetooth_power_drift_is_repaired_in_caged(self):
+        self.ctl.activate("sealed")
         self.system.bluetooth_data["adapter-b"]["powered"] = True
         self.assertIn("Bluetooth adapter is still powered on", self.ctl.verify())
         self.ctl.enforce()
         self.assertFalse(self.system.bluetooth_data["adapter-b"]["powered"])
+
+    def test_selective_radio_choices_survive_monitor_and_process_restart(self):
+        original = copy.deepcopy(self.system.__dict__)
+        self.ctl.activate("manual-wifi")
+        snapshot = copy.deepcopy(self.ctl.state)
+        self.system.bluetooth_data["adapter-a"]["powered"] = True
+        self.system.radio_data["bt"]["soft"] = False
+        self.system.radio_data["nfc"]["soft"] = False
+        self.system.nm_data["wwan"] = True
+        self.system.nm_data["wifi"] = False
+        self.system.radio_data["wifi"]["soft"] = True
+        self.system.events.clear()
+        resumed = self.controller()
+        resumed.enforce()
+        resumed.enforce()
+        self.assertTrue(self.system.bluetooth_data["adapter-a"]["powered"])
+        self.assertFalse(self.system.radio_data["bt"]["soft"])
+        self.assertFalse(self.system.radio_data["nfc"]["soft"])
+        self.assertTrue(self.system.nm_data["wwan"])
+        self.assertFalse(self.system.nm_data["wifi"])
+        self.assertEqual(resumed.verify(), [])
+        self.assertIn("wwan-test", resumed.state["signature"][1])
+        self.assertEqual(resumed.state["bluetooth"], snapshot["bluetooth"])
+        self.assertEqual(resumed.state["nm_radios"], snapshot["nm_radios"])
+        self.assertFalse(any(e.startswith(("bluetooth:", "radio:", "nm:")) for e in self.system.events))
+        self.assertTrue(resumed.restore()["healthy"])
+        for field in ("radio_data", "bluetooth_data", "nm_data"):
+            self.assertEqual(getattr(self.system, field), original[field])
+
+    def test_caged_clears_selective_choices_without_replaying_them(self):
+        self.ctl.activate("manual-wifi")
+        self.system.bluetooth_data["adapter-a"]["powered"] = True
+        self.system.radio_data["bt"]["soft"] = False
+        self.system.nm_data["wwan"] = True
+        self.ctl.activate("sealed")
+        self.assertFalse(any(a["powered"] for a in self.system.bluetooth().values()))
+        self.assertTrue(all(r["soft"] for r in self.system.radios().values()))
+        self.assertFalse(any(self.system.nm_data.values()))
+        self.ctl.activate("manual-wifi")
+        self.assertFalse(self.system.bluetooth_data["adapter-a"]["powered"])
+        self.assertFalse(self.system.nm_data["wwan"])
+        self.assertNotIn("wwan-test", self.ctl.state["signature"][1])
+
+    def test_selective_hotplug_is_initialized_then_user_can_enable(self):
+        self.ctl.activate("manual-wifi")
+        self.system.bluetooth_data["new"] = {"path": "/org/bluez/hci9", "powered": True}
+        self.system.radio_data["new"] = {"id": 99, "type": "wwan", "soft": False, "hard": False}
+        self.ctl.enforce()
+        self.assertFalse(self.system.bluetooth_data["new"]["powered"])
+        self.assertTrue(self.system.radio_data["new"]["soft"])
+        self.system.bluetooth_data["new"]["powered"] = True
+        self.system.radio_data["new"]["soft"] = False
+        self.controller().enforce()
+        self.assertTrue(self.system.bluetooth_data["new"]["powered"])
+        self.assertFalse(self.system.radio_data["new"]["soft"])
+
+    def test_failed_selective_initialization_retries_before_allowing_choices(self):
+        self.system.fail.add("bluetooth:/org/bluez/hci2")
+        with self.assertRaises(faraday.Failure):
+            self.ctl.activate("manual-wifi")
+        self.assertFalse(self.ctl.state["selective_ready"])
+        self.system.fail.clear()
+        resumed = self.controller()
+        resumed.enforce()
+        self.assertTrue(resumed.state["selective_ready"])
+        self.assertFalse(any(a["powered"] for a in self.system.bluetooth().values()))
+
+    def test_selective_keeps_earbuds_powered_but_repairs_discoverability(self):
+        self.ctl.activate("manual-wifi")
+        self.system.bluetooth_data["adapter-b"].update(powered=True, discoverable=True)
+        self.assertIn("Bluetooth adapter is discoverable", self.ctl.verify())
+        self.controller().enforce()
+        self.assertTrue(self.system.bluetooth_data["adapter-b"]["powered"])
+        self.assertFalse(self.system.bluetooth_data["adapter-b"]["discoverable"])
+        self.assertTrue(self.controller().restore()["healthy"])
+        self.assertTrue(self.system.bluetooth_data["adapter-b"]["discoverable"])
+
+    def test_discoverability_failure_is_reported_and_retried(self):
+        self.ctl.activate("manual-wifi")
+        self.system.bluetooth_data["adapter-b"].update(powered=True, discoverable=True)
+        self.system.fail.add("discoverable:/org/bluez/hci2")
+        with self.assertRaises(faraday.Failure):
+            self.ctl.enforce()
+        self.assertIn("Bluetooth adapter is discoverable", self.ctl.verify())
+        self.system.fail.clear()
+        self.controller().enforce()
+        self.assertFalse(self.system.bluetooth_data["adapter-b"]["discoverable"])
+
+    def test_discoverability_restore_failure_preserves_journal(self):
+        self.ctl.activate("manual-wifi")
+        self.system.fail.add("discoverable:/org/bluez/hci2")
+        self.assertFalse(self.ctl.restore()["healthy"])
+        self.assertTrue(self.ctl.path.exists())
+        self.system.fail.clear()
+        self.assertTrue(self.controller().restore()["healthy"])
+        self.assertTrue(self.system.bluetooth_data["adapter-b"]["discoverable"])
 
     def test_bluetooth_adapter_renumbering_preserves_original_power(self):
         self.ctl.activate("sealed")
@@ -419,6 +525,15 @@ class BluetoothTransitionTests(unittest.TestCase):
                 faraday.Linux(1000).set_bluetooth(self.adapter, True)
         self.assertEqual(run.call_count, 3)
 
+    def test_discoverable_write_is_verified_without_changing_power(self):
+        with patch.object(faraday, "run", side_effect=[SimpleNamespace(stdout='{"data":true}'), SimpleNamespace(stdout=""), SimpleNamespace(stdout='{"data":false}')]) as run:
+            with patch.object(faraday.time, "sleep"):
+                faraday.Linux(1000).set_bluetooth_discoverable(self.adapter, False)
+        self.assertEqual(run.call_count, 3)
+        self.assertIn("Discoverable", run.call_args_list[1].args)
+        self.assertNotIn("Powered", run.call_args_list[1].args)
+        self.assertEqual(run.call_args_list[1].args[-2:], ("b", "false"))
+
     def test_actual_permission_failure_is_not_suppressed(self):
         with patch.object(faraday, "run", side_effect=faraday.Failure("Access denied")):
             with self.assertRaisesRegex(faraday.Failure, "Access denied"):
@@ -492,6 +607,32 @@ class LegacyIdleTests(unittest.TestCase):
             faraday.idle_worker(directory, {"action": "restore", "snapshot": snapshot})
             self.assertEqual(json.loads(path.read_text())["idle"]["lock"], 42)
             self.assertEqual(awake.read_bytes(), b"original\x00")
+
+
+class CellularDiscoveryTests(unittest.TestCase):
+    def test_only_managed_cellular_ip_interfaces_are_allowed(self):
+        system = faraday.Linux(1000)
+        rows = {
+            'modem0': {'GENERAL.TYPE': 'gsm', 'GENERAL.NM-MANAGED': 'yes', 'GENERAL.IP-IFACE': 'ppp0'},
+            'modem1': {'GENERAL.TYPE': 'cdma', 'GENERAL.NM-MANAGED': 'yes', 'GENERAL.IP-IFACE': 'wwan7'},
+            'unmanaged': {'GENERAL.TYPE': 'gsm', 'GENERAL.NM-MANAGED': 'no', 'GENERAL.IP-IFACE': 'wwan8'},
+            'pending': {'GENERAL.TYPE': 'gsm', 'GENERAL.NM-MANAGED': 'yes', 'GENERAL.IP-IFACE': '--'},
+            'ethernet': {'GENERAL.TYPE': 'ethernet'},
+            'bluetooth': {'GENERAL.TYPE': 'bt'},
+        }
+        def command(*args, **kwargs):
+            if args == ('nmcli', '-g', 'GENERAL.DEVICE', 'device', 'show'):
+                return SimpleNamespace(stdout='\n'.join(rows))
+            return SimpleNamespace(stdout=rows[args[-1]][args[2]])
+        with patch.object(system, 'nm_radios', return_value={'wifi': True, 'wwan': True}), patch.object(faraday, 'run', side_effect=command):
+            self.assertEqual(system.cellular_devices(), {
+                'cellular:modem0': {'name': 'ppp0'}, 'cellular:modem1': {'name': 'wwan7'}})
+
+    def test_disabled_wwan_does_not_admit_cellular_interfaces(self):
+        system = faraday.Linux(1000)
+        with patch.object(system, 'nm_radios', return_value={'wifi': True, 'wwan': False}), patch.object(faraday, 'run') as command:
+            self.assertEqual(system.cellular_devices(), {})
+            command.assert_not_called()
 
 
 if __name__ == "__main__":

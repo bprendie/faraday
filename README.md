@@ -17,9 +17,15 @@ your system's existing configuration.
 - **Selective:** For deliberate Wi-Fi connections at coffee shops, airports,
   or hotels. Wi-Fi stays available, but autoconnect is disabled for managed
   Wi-Fi adapters and saved networks. Bluetooth, NFC, cellular, and other
-  discovered radios stay off. The firewall blocks unsolicited incoming
-  connections, Ethernet traffic, and forwarding, while allowing locally
-  initiated Wi-Fi traffic, replies, and necessary network maintenance traffic.
+  discovered radios start off, but you can enable them through your normal
+  system controls. Faraday leaves those choices alone during that Selective
+  session—for example, connect to airport Wi-Fi and turn on Bluetooth to listen
+  to WeazlTunes through your earbuds. Enabled NetworkManager cellular interfaces
+  can also carry outbound traffic. The firewall continues blocking unsolicited
+  incoming IP connections, Ethernet traffic, and forwarding while allowing
+  Wi-Fi/cellular traffic initiated by the laptop, replies, and necessary network
+  maintenance traffic. Bluetooth audio works independently of the IP firewall;
+  Bluetooth stays non-discoverable while powered on in Selective.
 - **Normal (Resume):** Turns Faraday off and restores the settings saved before
   lockdown, including radio power states and Wi-Fi autoconnect preferences.
   It removes Faraday's firewall tables; your original firewall rules remain
@@ -31,6 +37,26 @@ In Selective, use **Choose a Wi-Fi network…** to select a connection in Omarch
 network panel. Newly saved profiles are also journaled and have autoconnect
 disabled. Switching modes keeps the first activation's snapshot.
 
+Selecting **Caged** turns the radios off again and continuously enforces that
+state. Returning to **Selective** starts fresh: Wi-Fi available, other radios
+off. It does not remember or re-enable radios you enabled during the previous
+Selective session. **Normal** restores the original pre-Faraday settings,
+including Bluetooth discoverability. Temporary Selective choices do not replace
+that original snapshot.
+
+The monitor respects subsequent radio changes in Selective; the operating system
+does not tell Faraday whether a change came from a person or another service.
+This includes turning Wi-Fi off. Newly discovered adapters are initialized once
+before they can be enabled. Wi-Fi autoconnect remains disabled throughout.
+Cellular traffic becomes available after the next monitor reconciliation;
+cellular connection/autoconnect behavior is managed by NetworkManager when you
+enable WWAN. The firewall does not filter Bluetooth pairing or audio.
+Faraday enforces BlueZ
+`Discoverable=false` in Selective, correcting changes on the monitor cycle.
+Already-paired earbuds can connect without making the laptop discoverable.
+Use Normal if you want to make the laptop discoverable; Faraday leaves that
+control alone after restoration. Non-discoverable does not mean RF-invisible.
+
 Faraday controls radios and network isolation. Screen-lock timing, stay-awake,
 and other desktop idle settings are outside its scope and are left untouched.
 
@@ -41,7 +67,7 @@ and other desktop idle settings are outside its scope and are left untouched.
   adapters by address. Discovery never starts an inactive Bluetooth service.
 - Before applying isolation, it creates an atomic, root-private journal at
   `/var/lib/faraday/snapshot.json` to record radio states, adapter flags,
-  Bluetooth power states, active wireless connections, and Wi-Fi autoconnect
+  Bluetooth power and discoverability states, active wireless connections, and Wi-Fi autoconnect
   preferences.
 - Existing UFW, firewalld, Docker, and custom rules remain untouched. Faraday
   exclusively manages its own `inet faraday` and `bridge faraday` tables.
@@ -51,7 +77,7 @@ and other desktop idle settings are outside its scope and are left untouched.
 
 This repository includes the widget, original vector artwork, privileged
 controller, installer, and tests. Faraday is an independent third-party plugin,
-not an Omarchy-endorsed or audited security product. Version 0.1.2 is a
+not an Omarchy-endorsed or audited security product. Version 0.1.3 is a
 development release; see the validation limits below.
 
 ## Requirements & setup

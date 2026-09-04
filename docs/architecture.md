@@ -34,8 +34,25 @@ problem. Previous errors are cleared at the start of a new attempt.
 
 Bluetooth uses two controls: rfkill blocks the radio and BlueZ Adapter1.Powered
 switches off the adapter. Original power values are saved by Bluetooth address,
-so hci index changes do not apply the wrong adapter's settings. Both active
-modes verify that all discovered adapters are powered off. Restoration first
+so hci index changes do not apply the wrong adapter's settings. Caged continuously
+verifies that discovered adapters are powered off. Selective initializes each
+adapter once, then respects subsequent radio power and rfkill changes. Durable
+`selective_ready`, `selective_radios`, and `selective_bluetooth` fields record
+initialization, independently of the original restoration fields. These fields
+are cleared on every explicit mode entry; a process restart retains them, while
+Caged and reboot enforce radios off. Initialization failures are retried before
+an adapter is released to user control. The monitor cannot distinguish a user's
+power change from a change made by another service.
+
+Discoverability remains constrained: active modes clear BlueZ Adapter1.Discoverable
+before powering an adapter off, and Selective clears it whenever a powered
+adapter becomes discoverable. Original values are journaled and restored after
+power restoration for originally powered adapters. Old snapshots without that
+field retain their existing power-only recovery behavior. Readback failures keep
+the recovery journal. DiscoverableTimeout and Pairable are not changed. This is
+polling enforcement, so another service can briefly enable visibility between
+checks. See the [BlueZ Adapter API](https://bluez.readthedocs.io/en/latest/adapter-api/)
+for the distinction between discoverability, discovery, and pairing. Restoration first
 restores rfkill state, then the original Bluetooth power values. D-Bus probes
 check service ownership and use `--auto-start=no`; discovery must never start a
 radio daemon as a side effect.
@@ -51,7 +68,12 @@ An nftables accept in one base chain does not override a drop in another.
 See the [nftables verdict documentation](https://netfilter.org/projects/nftables/manpage.html)
 and [base-chain priorities](https://wiki.nftables.org/wiki-nftables/index.php/Configuring_chains).
 
-Selective allows only the discovered Wi-Fi interfaces for external egress.
+Selective allows discovered Wi-Fi interfaces and NetworkManager-managed
+cellular IP interfaces while WWAN is enabled. Discovery uses GENERAL.IP-IFACE
+so PPP data interfaces are included rather than the modem control device.
+The monitor updates firewall rules when that interface set changes. Ethernet,
+VPN, and Bluetooth PAN interfaces are not added. Bluetooth audio does not pass
+through these IP tables.
 Incoming exceptions are reply-direction established/related traffic, DHCPv4,
 link-local DHCPv6, and IPv6 router/neighbor messages with hop limit 255. Existing
 inbound sessions do not qualify as reply-direction traffic. IPv4 and IPv6

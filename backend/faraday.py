@@ -22,7 +22,7 @@ import tempfile
 import threading
 import time
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 STATE = Path("/var/lib/faraday")
 PUBLIC = Path("/run/faraday/status.json")
 ENV = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C"}
@@ -115,18 +115,18 @@ def idle_worker(home, request):
     return True
 
 
-def firewall_rules(mode, wifi_interfaces=()):
+def firewall_rules(mode, wireless_interfaces=()):
     """Owned tables only. No flush ruleset and no changes to UFW/firewalld.
 
     Conntrack reply direction prevents existing inbound sessions bypassing the
-    lockdown. Manual Wi-Fi allows DHCP and IPv6 link maintenance, not listeners.
+    lockdown. Selective allows DHCP and IPv6 link maintenance, not listeners.
     """
     incoming = 'iifname "lo" accept;'
     outgoing = 'oifname "lo" accept;'
     if mode == "manual-wifi":
-        if not wifi_interfaces:
+        if not wireless_interfaces:
             raise Failure("No managed Wi-Fi adapter is available")
-        names = ", ".join(json.dumps(name) for name in sorted(wifi_interfaces))
+        names = ", ".join(json.dumps(name) for name in sorted(wireless_interfaces))
         incoming += f"""
         iifname {{ {names} }} ct direction reply ct state established,related accept;
         iifname {{ {names} }} udp sport 67 udp dport 68 accept;
@@ -213,10 +213,17 @@ class Linux:
             adapter = interfaces.get("org.bluez.Adapter1")
             if adapter is not None:
                 address = adapter["Address"]["data"]
-                adapters[address] = {"path": path, "powered": adapter["Powered"]["data"]}
+                adapters[address] = {"path": path, "powered": adapter["Powered"]["data"],
+                                     "discoverable": adapter["Discoverable"]["data"]}
         return adapters
 
     def set_bluetooth(self, adapter, powered):
+        self.set_bluetooth_property(adapter, "Powered", powered)
+
+    def set_bluetooth_discoverable(self, adapter, discoverable):
+        self.set_bluetooth_property(adapter, "Discoverable", discoverable)
+
+    def set_bluetooth_property(self, adapter, property_name, wanted):
         # Unblocking rfkill can itself power the adapter on, or leave BlueZ
         # briefly unready. Read before writing and allow the transition to settle.
         deadline = time.monotonic() + 30
@@ -224,18 +231,18 @@ class Linux:
         while True:
             try:
                 value = json.loads(run("busctl", "--auto-start=no", "--json=short", "get-property",
-                                       "org.bluez", adapter["path"], "org.bluez.Adapter1", "Powered",
+                                       "org.bluez", adapter["path"], "org.bluez.Adapter1", property_name,
                                        timeout=10).stdout)["data"]
-                if value == powered:
+                if value == wanted:
                     return
                 run("busctl", "--auto-start=no", "set-property", "org.bluez", adapter["path"],
-                    "org.bluez.Adapter1", "Powered", "b", "true" if powered else "false", timeout=10)
+                    "org.bluez.Adapter1", property_name, "b", "true" if wanted else "false", timeout=10)
             except (Failure, subprocess.TimeoutExpired) as exc:
                 last_error = exc
                 if any(marker in str(exc).lower() for marker in ("accessdenied", "access denied", "not authorized", "permission denied")):
                     raise
             if time.monotonic() >= deadline:
-                raise Failure("Bluetooth did not reach its requested power state after 30 seconds"
+                raise Failure(f"Bluetooth did not reach its requested {property_name} state after 30 seconds"
                               + (f": {last_error}" if last_error else ""))
             time.sleep(1)
 
@@ -252,6 +259,22 @@ class Linux:
             auto = run("nmcli", "-g", "GENERAL.AUTOCONNECT", "device", "show", name).stdout.strip()
             identity = str((Path("/sys/class/net") / name / "device").resolve())
             result[identity] = {"name": name, "autoconnect": auto == "yes"}
+        return result
+
+    def cellular_devices(self):
+        """Discover NetworkManager cellular IP interfaces, including PPP names."""
+        if not self.nm_radios().get("wwan"):
+            return {}
+        names = run("nmcli", "-g", "GENERAL.DEVICE", "device", "show").stdout.splitlines()
+        result = {}
+        for name in filter(None, names):
+            kind = run("nmcli", "-g", "GENERAL.TYPE", "device", "show", name).stdout.strip()
+            if kind not in ("gsm", "cdma"):
+                continue
+            managed = run("nmcli", "-g", "GENERAL.NM-MANAGED", "device", "show", name).stdout.strip()
+            interface = run("nmcli", "-g", "GENERAL.IP-IFACE", "device", "show", name).stdout.strip()
+            if managed == "yes" and interface and interface != "--":
+                result["cellular:" + name] = {"name": interface}
         return result
 
     def manual_supported(self):
@@ -406,6 +429,7 @@ class Controller:
         messages = {"restore-barrier": "Preparing restore…", "disconnect": "Releasing current connections…",
                     "idle": "Restoring your screen-lock settings…", "nm": "Restoring wireless radios…",
                     "radio": "Restoring radio settings…", "bluetooth": "Restoring Bluetooth…",
+                    "bluetooth-discoverable": "Restoring Bluetooth visibility…",
                     "profile": "Restoring Wi-Fi preferences…", "device": "Restoring Wi-Fi adapters…",
                     "firewall": "Restoring your firewall…", "connection": "Reconnecting your original networks…"}
         self.progress = messages.get(key.split(":", 1)[0], "Restoring your original settings…")
@@ -451,6 +475,11 @@ class Controller:
         self.state["mode"] = mode
         self.state["phase"] = "applying"
         self.state["needs_disconnect"] = True
+        # Session policy is separate from the immutable original restore snapshot.
+        # A new mode entry must never replay radio choices from Selective.
+        self.state["selective_ready"] = False
+        self.state["selective_radios"] = []
+        self.state["selective_bluetooth"] = []
         self.save()
         self.publish([])
         try:
@@ -497,45 +526,66 @@ class Controller:
                 self.system.disconnect(uuid)
             s["needs_disconnect"] = False
             self.save()
-        for adapter in self.system.bluetooth().values():
-            if adapter["powered"]:
+        bluetooth = self.system.bluetooth()
+        for key, adapter in bluetooth.items():
+            # Hide before powering down: BlueZ rejects property writes while off.
+            # In Selective this remains enforced even when power is user-controlled.
+            if adapter.get("discoverable") and adapter["powered"]:
+                self.system.set_bluetooth_discoverable(adapter, False)
+            if self.radio_controlled("selective_bluetooth", key) and adapter["powered"]:
                 self.system.set_bluetooth(adapter, False)
-        for kind, value in self.system.nm_radios().items():
-            wanted = kind == "wifi" and mode == "manual-wifi"
-            if wanted != value:
-                self.system.set_nm_radio(kind, wanted)
-        for radio in radios.values():
+        if mode == "sealed" or not s.get("selective_ready"):
+            for kind, value in self.system.nm_radios().items():
+                wanted = kind == "wifi" and mode == "manual-wifi"
+                if wanted != value:
+                    self.system.set_nm_radio(kind, wanted)
+        for key, radio in radios.items():
             blocked = not (mode == "manual-wifi" and radio["type"] == "wlan")
-            if radio["soft"] != blocked:
+            if self.radio_controlled("selective_radios", key) and radio["soft"] != blocked:
                 self.system.set_radio(radio, blocked)
-        signature = [mode, sorted(d["name"] for d in devices.values())]
+        egress = dict(devices)
+        if mode == "manual-wifi":
+            egress.update(self.system.cellular_devices())
+        signature = [mode, sorted(d["name"] for d in egress.values())]
         if self.system.table_state() != s["firewall"] or s.get("signature") != signature:
-            s["firewall"] = self.system.firewall(mode, devices)
+            s["firewall"] = self.system.firewall(mode, egress)
             s["signature"] = signature
             self.save()
         errors = self.verify()
+        if not errors and mode == "manual-wifi":
+            s["selective_ready"] = True
+            s["selective_radios"] = sorted(set(s.get("selective_radios", [])) | set(radios))
+            s["selective_bluetooth"] = sorted(set(s.get("selective_bluetooth", [])) | set(bluetooth))
         s["phase"] = "error" if errors else "active"
         self.save()
         self.publish(errors)
         if errors:
             raise Failure("; ".join(errors))
 
+    def radio_controlled(self, field, key):
+        """Caged enforces continuously; Selective initializes each adapter once."""
+        return (self.state["mode"] == "sealed" or not self.state.get("selective_ready")
+                or key not in self.state.get(field, []))
+
     def verify(self):
         errors = []
         mode = self.state["mode"]
         if self.system.table_state() != self.state["firewall"] or len(self.state["firewall"]) != 2:
             errors.append("Firewall verification failed")
-        for radio in self.system.radios().values():
+        for key, radio in self.system.radios().items():
             blocked = not (mode == "manual-wifi" and radio["type"] == "wlan")
-            if radio["soft"] != blocked:
+            if self.radio_controlled("selective_radios", key) and radio["soft"] != blocked:
                 errors.append(f"Radio policy failed: {radio['type']}")
         for kind, value in self.system.nm_radios().items():
-            if value != (kind == "wifi" and mode == "manual-wifi"):
+            if (mode == "sealed" or not self.state.get("selective_ready")) and value != (kind == "wifi" and mode == "manual-wifi"):
                 errors.append(f"NetworkManager {kind} policy failed")
         if any(self.system.profiles().values()) or any(d["autoconnect"] for d in self.system.devices().values()):
             errors.append("Wi-Fi autoconnect is enabled")
-        if any(adapter["powered"] for adapter in self.system.bluetooth().values()):
+        if any(adapter["powered"] and self.radio_controlled("selective_bluetooth", key)
+               for key, adapter in self.system.bluetooth().items()):
             errors.append("Bluetooth adapter is still powered on")
+        if any(a["powered"] and a.get("discoverable") for a in self.system.bluetooth().values()):
+            errors.append("Bluetooth adapter is discoverable")
         return errors
 
     def boot(self):
@@ -623,6 +673,9 @@ class Controller:
                     continue
                 step("bluetooth:" + address,
                      lambda a=address, v=saved: self.system.set_bluetooth(bluetooth[a], v["powered"]))
+                if "discoverable" in saved and saved["powered"]:
+                    step("bluetooth-discoverable:" + address,
+                         lambda a=address, v=saved: self.system.set_bluetooth_discoverable(bluetooth[a], v["discoverable"]))
         except Exception as exc:
             errors.append("Bluetooth restore: " + str(exc))
         for uuid, value in s["profiles"].items():
@@ -672,6 +725,9 @@ class Controller:
         for address, saved in s.get("bluetooth", {}).items():
             if address not in bluetooth or bluetooth[address]["powered"] != saved["powered"]:
                 errors.append("Original Bluetooth power state did not restore")
+            if ("discoverable" in saved and saved["powered"] and
+                    (address not in bluetooth or bluetooth[address].get("discoverable") != saved["discoverable"])):
+                errors.append("Original Bluetooth discoverability did not restore")
         for key, saved in s["radios"].items():
             if key not in radios or radios[key]["soft"] != saved["soft"]:
                 errors.append("Original radio state did not restore: " + saved["device"])
