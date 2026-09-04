@@ -6,7 +6,7 @@ import shutil
 import tempfile
 
 CONTENTS = ("manifest.json", "Panel.qml", "CageIcon.qml", "Model.js", "LICENSE",
-            "README.md", "faraday.png", "install.sh", "uninstall.sh", "backend", "packaging",
+            "README.md", "faraday.png", "preview.png", "install.sh", "uninstall.sh", "backend", "packaging",
             "tools", "tests", "docs", "assets")
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.qmlc")
 

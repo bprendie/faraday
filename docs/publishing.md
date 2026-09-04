@@ -9,7 +9,7 @@ and [development guide](https://plugins.omarchy.org/develop.html) on 2026-09-04.
 | README and license | Present; MIT also declared in manifest |
 | Safe installation/removal | Explicit privileged helper setup; guarded removal; original recovery journals retained; no automatic lockdown on install |
 | Plugin files without symlinks | Installer creates a curated copy; preserves previous installation outside plugin discovery |
-| Optional preview | Widget screenshot in faraday.png; original SVG state icons and HTML preview under assets/ |
+| Optional preview | Marketplace screenshot in root preview.png; README screenshot in faraday.png; original SVG state icons and HTML preview under assets/ |
 | Public GitHub repository | [bprendie/faraday](https://github.com/bprendie/faraday) |
 | Marketplace submission | Pending final lifecycle testing and submission |
 
